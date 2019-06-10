@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: 2010-09-09
+Metadata:
+  'AWS::CloudFormation::Designer':
+    46a427bf-6114-45b7-8d04-e8a6f0a2cab9:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 111
+        'y': 69
+      z: 0
+      embeds: []
+Resources:
+  CommentsTable:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: comments
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+        
+  DynamoDBRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: appsync-comment-app-dynamodb-role
+      ManagedPolicyArns:
+        - Ref: AppSyncDynamoDBPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - appsync.amazonaws.com
+    DependsOn:
+      - AppSyncDynamoDBPolicy
+
+  AppSyncDynamoDBPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Path: /appsync/
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:DeleteItem
+              - dynamodb:UpdateItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+            Resource: !Join [ "", [ !GetAtt CommentsTable.Arn, "*" ] ]
+
+  AppSyncApi:
+    Type: "AWS::AppSync::GraphQLApi"
+    Description: "The GraphQL API for Comments"
+    Properties:
+      AuthenticationType: "API_KEY"
+      Name: CommentsAPI
+
+  AppSyncSchema:
+    Type: "AWS::AppSync::GraphQLSchema"
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Definition: |
+        type Comment {
+            id: ID!
+            content: String
+        }
+        
+        type CommentConnection {
+            items: [Comment]
+            nextToken: String
+        }
+        
+        type Mutation {
+            saveComment(content: String!): Comment
+        }
+        
+        type Query {
+            allComments: CommentConnection
+            getComment(id: ID!): Comment
+        }
+        
+        type Schema {
+            query: Query
+            mutation: Mutation
+            subscription: Subscription
+        }
+        
+        type Subscription {
+            onSaveComment: Comment
+                @aws_subscribe(mutations: ["saveComment"])
+        }
+  AppSyncCommentTableDataSource:
+    Type: "AWS::AppSync::DataSource"
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Name: CommentsAPI_datasource
+      Type: AMAZON_DYNAMODB
+      ServiceRoleArn: !GetAtt DynamoDBRole.Arn
+      DynamoDBConfig:
+        TableName: !Ref CommentsTable
+        AwsRegion: !Sub ${AWS::Region}
+
+  AppSyncAllCommentsQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncSchema
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: Query
+      FieldName: allComments
+      DataSourceName: !GetAtt AppSyncCommentTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version" : "2017-02-28",
+          "operation" : "Scan"
+        }
+      ResponseMappingTemplate: "$util.toJson($ctx.result)"
+  AppSyncGetCommentQueryResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncSchema
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: Query
+      FieldName: getComment
+      DataSourceName: !GetAtt AppSyncCommentTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "GetItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.args.id),
+          }
+        }
+      ResponseMappingTemplate: "$util.toJson($ctx.result)"
+
+  AppSyncSaveCommentMutationResolver:
+    Type: "AWS::AppSync::Resolver"
+    DependsOn: AppSyncSchema
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: Mutation
+      FieldName: saveComment
+      DataSourceName: !GetAtt AppSyncCommentTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "PutItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($util.autoId()),
+          },
+          "attributeValues": {
+            "content": $util.dynamodb.toDynamoDBJson($ctx.args.content)
+          }
+        }
+      ResponseMappingTemplate: "$util.toJson($ctx.result)"
+
+  AppSyncCommnentApiKey:
+    Type: "AWS::AppSync::ApiKey"
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+
+Outputs:
+  AppSyncApiKey:
+    Description: Api Key de AppSync Comments
+    Value: !GetAtt AppSyncCommnentApiKey.ApiKey
